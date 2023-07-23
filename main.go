@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -9,14 +10,42 @@ import (
 	"os"
 	"path"
 	"strings"
+
+	"github.com/lordvidex/vpn-gate/osascripts"
 )
 
 func main() {
-	data, err := getData()
+	removeOldConfigs := flag.Bool("rm", false, "removes old configurations before fetchin new ovpn files")
+	exceptRemove := flag.String("no-rm", "", "specify the name of the configuration to not remove")
+	install := flag.Bool("install", false, "installs downloaded configurations after downloading them")
+	clearConfigs := flag.Bool("clear", false, "removes all configurations installed with vpn-gate")
+	printConfigs := flag.Bool("print", false, "prints all the current configurations and ends")
+
+	flag.Parse()
+
+	exempted := strings.Split(*exceptRemove, ",")
+	if *clearConfigs {
+		osascripts.DeleteInstalledConfigs(exempted...)
+		return
+	}
+
+	if *printConfigs {
+		configs, err := osascripts.GetConfigs()
+		if err != nil {
+			log.Fatalln("error getting configs: ", err.Error())
+		}
+		for _, config := range configs {
+			fmt.Println(config)
+		}
+		return
+	}
+
+	// download section
+	data, err := getHTML()
 	if err != nil {
 		log.Fatalln("error occured getting data", err)
 	}
-	links := getLinks(data)
+	links := extractLinks(data)
 	if len(links) == 0 {
 		log.Println("No task to perform, no link was found")
 		return
@@ -24,11 +53,23 @@ func main() {
 	for _, link := range links {
 		fmt.Println(link)
 	}
-	err = downloadFiles(links[0])
+	files, err := downloadFiles(links[0])
 	if err != nil {
 		log.Println("error downloading files: ", err.Error())
 	} else {
-		fmt.Println("successfully downloaded files")
+		fmt.Println("successfully downloaded files:", strings.Join(files, ", "))
+	}
+
+	if *install {
+		osascripts.InstallConfigs(files)
+		// for _, file := range files {
+		// 	delete(file)
+		// }
+	}
+
+	if *removeOldConfigs {
+		exempted = append(exempted, files...)
+		osascripts.DeleteInstalledConfigs(exempted...)
 	}
 }
 
@@ -45,27 +86,28 @@ func parseLinks(link string) []string {
 	for linkRunes[i] != '?' {
 		i++
 	}
-	keyMode := true // true for reading into key, false for reading into value
+	isKey := true // true for reading into key, false for reading into value
 	for i = i + 1; i < len(linkRunes); i++ {
 		switch linkRunes[i] {
 		case '=':
-			keyMode = false // start reading values
+			isKey = false // start reading values
 		case '&':
 			if len(key) != 0 {
 				m[string(key)] = string(value)
 			}
 			key = key[:0]
 			value = value[:0]
-			keyMode = true
+			isKey = true
 
 		default:
-			if keyMode {
+			if isKey {
 				key = append(key, linkRunes[i])
 			} else {
 				value = append(value, linkRunes[i])
 			}
 		}
 	}
+	// Various examples of download links look like this:
 	// https://www.vpngate.net/common/openvpn_download.aspx?sid=1681857232096&tcp=1&host=public-vpn-234.opengw.net&port=443&hid=15134981&/vpngate_public-vpn-234.opengw.net_tcp_443.ovpn
 	// https://www.vpngate.net/common/openvpn_download.aspx?sid=1681859492426&udp=1&host=public-vpn-232.opengw.net&port=1195&hid=15134979&/vpngate_public-vpn-232.opengw.net_udp_1195.ovpn
 	// https://www.vpngate.net/common/openvpn_download.aspx?sid=1681860645727&tcp=1&host=public-vpn-257.opengw.net&port=443&hid=15135005&/vpngate_public-vpn-257.opengw.net_tcp_443.ovpn
@@ -96,44 +138,59 @@ func parseLinks(link string) []string {
 	return ans
 }
 
-func downloadFiles(link string) error {
+func downloadFiles(link string) ([]string, error) {
 	// get the data
 	url := parseLinks(link)
 	if len(url) == 0 {
-		return errors.New("URL is empty")
+		return nil, errors.New("URL is empty")
 	}
+	files := make([]string, 0, len(url))
 	for _, u := range url {
-		err := dwn(u)
+		file, err := downloadFile(u)
 		if err != nil {
-			return err
+			return nil, err
 		}
+		files = append(files, file)
 	}
-	return nil
+	return files, nil
 }
 
-// downloads each of the ovpn files
-func dwn(url string) error {
+func delete(fileName string) {
+	// deletes the file that was downloaded if it exists
+	if _, err := os.Stat(fileName); err == nil {
+		err = os.Remove(fileName)
+		if err != nil {
+			log.Println("error deleting file: ", err.Error())
+		}
+	}
+}
+
+// downloads each of the ovpn files.
+// returns the name of the file and an error if any
+func downloadFile(url string) (fileName string, err error) {
 	resp, err := http.Get(url)
 	if err != nil {
-		return errors.Join(err, errors.New("failed downloading file"))
+		return "", errors.Join(err, errors.New("failed downloading file"))
 	}
 	defer resp.Body.Close()
 	// Create the file
-	log.Printf("reading file %s into file %s", url, path.Base(url))
-	out, err := os.Create(path.Base(url))
+	fileName = path.Base(url)
+	log.Printf("reading file %s into file %s", url, fileName)
+	out, err := os.Create(fileName)
 	if err != nil {
-		return errors.Join(err, errors.New("failed to create file"))
+		return "", errors.Join(err, errors.New("failed to create file"))
 	}
 	defer out.Close()
 
 	// Write the response body to the file
 	_, err = io.Copy(out, resp.Body)
-	return err
+	return fileName, err
 }
 
-// getLinks reads the response passed to it and finds a particular pattern that denotes
+// extractLinks reads the response passed to it and finds a particular pattern that denotes
 // the links that lead to configuration page
-func getLinks(data []byte) []string {
+// TODO: regexp?
+func extractLinks(data []byte) []string {
 	links := make([]string, 0)
 	pattern := []byte("do_openvpn.aspx?fqdn=")
 	var b strings.Builder
@@ -161,7 +218,9 @@ func getLinks(data []byte) []string {
 		}
 		if found {
 			var str string
-			str, i = grabLink(i)
+			var newI int
+			str, newI = grabLink(i)
+			i = newI
 			links = append(links, str)
 			// TODO: we only need the first for now, also, we get speed
 			return links
@@ -170,8 +229,8 @@ func getLinks(data []byte) []string {
 	return links
 }
 
-// getData reads the html response from the vpngate website
-func getData() ([]byte, error) {
+// getHTML reads the html response from the vpngate website
+func getHTML() ([]byte, error) {
 	res, err := http.Get("https://www.vpngate.net/en/#LIST")
 	if err != nil {
 		return nil, err
