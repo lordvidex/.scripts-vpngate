@@ -23,6 +23,7 @@ Run `vpn-gate --help` to view available options and their descriptions
 Note that the use of some of the flags will require that [Tunnelblick](https://tunnelblick.net/index.html) is installed.
 |flag|description|requires Tunnelblick|
 |-|-|-|
+||not adding any flag, simply downloads the ovpn configs in the current working directory|
 |`-clear`|removes configs installed with this CLI, i.e. it does not tamper with configs installed through other means|✅|
 |`-install`|installs with tunnelblick, when not added, it just downloads the configs|✅|
 |`-rm`|removes old configurations before fetching ovpn files, this is useful if the old configs have stopped working. To prevent removal of certain configs, see `-no-rm`|✅|
